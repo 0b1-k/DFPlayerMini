@@ -1,4 +1,4 @@
-module DFPlayerMini
+module github.com/0b1-k/DFPlayerMini
 
 go 1.21.2
 

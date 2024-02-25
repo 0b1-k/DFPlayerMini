@@ -1,7 +1,9 @@
 package DFPlayerMini
 
 // Package DFPlayerMini provides a driver for the MP3 player by DFRobot
+//
 // Author: Fabien Royer
+//
 // Datasheet:
 // https://github.com/DFRobot/DFRobotDFPlayerMini/blob/master/doc/FN-M16P%2BEmbedded%2BMP3%2BAudio%2BModule%2BDatasheet.pdf
 
@@ -131,12 +133,15 @@ type SerialPort interface {
 
 // Wraps the DF Player Mini functions
 type Device struct {
-	rx              []byte
-	tx              []byte
-	tempRx          []byte
-	port            SerialPort
-	debug           uint
-	minDelayOnWrite time.Duration
+	rx                  []byte
+	tx                  []byte
+	tempRx              []byte
+	port                SerialPort
+	debug               uint
+	statusErrorCount    int64
+	minDelayOnWrite     time.Duration
+	trackRuntime        time.Duration
+	maxTestTrackRuntime time.Duration
 }
 
 // Creates and initializes a new DF Player Mini
@@ -159,6 +164,14 @@ func (d *Device) Init(port SerialPort, dbg uint) {
 	d.tx[FrameLengthOffset] = Length
 	d.tx[FrameFeedbackOffset] = FeedbackNotRequired
 	d.tx[FrameEndByteOffset] = EndByte
+}
+
+func (d *Device) GetDebugLevel() uint {
+	return d.debug
+}
+
+func (d *Device) SetDebugLevel(level uint) {
+	d.debug = level
 }
 
 // Play the next track in the global track list maintained internally by the MP3 player
@@ -191,13 +204,15 @@ func (d *Device) PlayFolderTrack(folder, track uint8) {
 }
 
 // Play a track (1-3000) located within a folder (01-99)
-func (d *Device) Play3KFolderTrack(folder uint8, track uint16) {
+func (d *Device) Play3KFolderTrack(folder uint8, track uint16) bool {
 	if folder <= 15 {
 		param := (uint16(folder) << 12) | (track & 0xfff)
 		d.tx[FrameCommandOffset] = PlayTrack3K
 		d.setUInt16(FrameParamMSBOffset, param)
 		d.write()
+		return true
 	}
+	return false
 }
 
 // Play a track (1-3000) located within the 'mp3' folder
@@ -301,7 +316,6 @@ func (d *Device) Reset() {
 	d.tx[FrameCommandOffset] = Reset
 	d.setUInt16(FrameParamMSBOffset, 0)
 	d.write()
-	d.waitPowerUpReady()
 }
 
 // Resume playback
@@ -462,8 +476,8 @@ func (d *Device) GetCurrentSDtrack() (uint16, bool) {
 
 // Get the track count within a folder (1-99)
 func (d *Device) GetFolderTrackCount(folder uint8) (uint16, bool) {
-	_, result, ok := d.query(GetFolderTrakCount, 0, folder)
-	if ok {
+	cmd, result, ok := d.query(GetFolderTrakCount, 0, folder)
+	if ok && cmd != ErrorCondition {
 		return result, true
 	}
 	return 0, false
@@ -507,13 +521,67 @@ func (d *Device) BuildFolderPlaylist() (map[uint8]uint16, uint16) {
 	return pl, total
 }
 
+// Check on the current playback status
+// Returns ErrorCondition in case a status query fails.
+// Returns ErrorTrackNotFound when a track or folder is not found.
+// Returns MediaOut when the storage is ejected.
+// Returns SdTrackFinished when a track complete playback
+// Return TrackPlaying when a track is in progress
+func (d *Device) CheckTrackStatus(trackPlaytimeIncrement, minTrackPlaybackTime time.Duration) uint {
+	cmd, param, ok := d.QueryStatus()
+	if ok {
+		switch cmd {
+		case ErrorCondition:
+			if param == ErrorTrackOutOfScope || param == ErrorTrackNotFound {
+				return ErrorTrackNotFound
+			}
+
+		case MediaOut:
+			return MediaOut
+
+		case SdTrackFinished:
+			if d.trackRuntime > minTrackPlaybackTime {
+				if d.debug > 0 {
+					println(fmt.Sprintf("SD card track #%04d finished playing", param))
+				}
+				d.trackRuntime = time.Duration(time.Second * 0)
+				return SdTrackFinished
+			}
+
+		case GetStatus:
+			if (param & 0x00FF) == TrackPlaying {
+				d.trackRuntime = d.trackRuntime + trackPlaytimeIncrement
+				if d.maxTestTrackRuntime > 0 && d.trackRuntime > d.maxTestTrackRuntime {
+					return SdTrackFinished
+				}
+				time.Sleep(trackPlaytimeIncrement)
+				return TrackPlaying
+			}
+		}
+	} else {
+		d.statusErrorCount++
+		if d.debug > 0 {
+			println(fmt.Sprintf("QueryStatus() error count: %02d", d.statusErrorCount))
+		}
+	}
+	return ErrorCondition
+}
+
+// Set for a maximum track playback duration during tests
+func (d *Device) SetMaxTestTrackRuntime(max time.Duration) {
+	d.maxTestTrackRuntime = max
+	d.trackRuntime = 0
+}
+
 // Wait for the device to complete its initialization after a reset
-func (d *Device) waitPowerUpReady() {
+func (d *Device) WaitStorageReady() {
+	d.Discard()
 	for {
-		_, _, valid := d.readMp3Response()
-		if valid {
+		_, ok := d.GetOnlineStorage()
+		if ok {
 			return
 		}
+		time.Sleep(time.Millisecond * 100)
 	}
 }
 
@@ -527,7 +595,7 @@ func (d *Device) query(cmd, msb, lsb uint8) (uint8, uint16, bool) {
 
 	respCmd, param, valid := d.readMp3Response()
 
-	if valid && cmd != ErrorCondition {
+	if valid {
 		return respCmd, param, valid
 	}
 	return 0, 0, false
@@ -567,10 +635,10 @@ func (d *Device) readMp3Response() (uint8, uint16, bool) {
 			println(fmt.Sprintf("rx: %02x", d.rx))
 		}
 		if d.validateChecksum() {
-			valid := d.decodeResponse()
-			if valid {
-				return d.rx[FrameCommandOffset], d.getUInt16(FrameParamMSBOffset), valid
+			if d.debug > DebugQuiet {
+				d.decodeResponse()
 			}
+			return d.rx[FrameCommandOffset], d.getUInt16(FrameParamMSBOffset), true
 		} else {
 			if d.debug > 0 {
 				println(fmt.Sprintf("bad checksum rx: %02x", d.rx))
@@ -674,7 +742,7 @@ func (d *Device) getUInt16(offset uint8) uint16 {
 
 // Attempt to decode the response sent by the MP3 player.
 // Returns 'false' if the response contains an error condition.
-func (d *Device) decodeResponse() bool {
+func (d *Device) decodeResponse() {
 	sb := strings.Builder{}
 	param := d.getUInt16(FrameParamMSBOffset)
 	switch d.rx[FrameCommandOffset] {
@@ -789,5 +857,4 @@ func (d *Device) decodeResponse() bool {
 	if d.debug >= 2 || (d.rx[FrameCommandOffset] == ErrorCondition && d.debug >= 1) {
 		println(sb.String())
 	}
-	return d.rx[FrameCommandOffset] != ErrorCondition
 }

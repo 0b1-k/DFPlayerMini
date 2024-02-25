@@ -1,7 +1,6 @@
 package DFPlayerMini
 
 import (
-	"fmt"
 	"testing"
 	"time"
 
@@ -11,13 +10,35 @@ import (
 const (
 	minTrackPlaybackTime   = time.Duration(time.Second * 3)
 	trackPlaytimeIncrement = time.Duration(time.Second)
+	serialPortPath         = "/dev/ttyUSB1"
 )
 
-func TestAllFolderSequentialPlayback(t *testing.T) {
-	sp, err := serial.Open("/dev/ttyUSB1", &serial.Mode{BaudRate: 9600, DataBits: 8, Parity: serial.NoParity, StopBits: serial.OneStopBit})
+func TestPlayerReset(t *testing.T) {
+	sp, err := serial.Open(serialPortPath, &serial.Mode{BaudRate: 9600, DataBits: 8, Parity: serial.NoParity, StopBits: serial.OneStopBit})
 	if err != nil {
-		println(fmt.Sprintf("serial.Open() failed: %v", err))
-		panic(err)
+		t.Fail()
+		return
+	}
+
+	sp.SetReadTimeout(time.Millisecond * 10)
+	defer sp.Close()
+
+	player := New(sp, DebugLevel1)
+
+	time.Sleep(time.Millisecond * 500)
+
+	player.Reset()
+
+	player.SelectPlaybackSource(PlaybackSourceSD)
+
+	player.WaitStorageReady()
+}
+
+func TestGetSDTrackCount(t *testing.T) {
+	sp, err := serial.Open(serialPortPath, &serial.Mode{BaudRate: 9600, DataBits: 8, Parity: serial.NoParity, StopBits: serial.OneStopBit})
+	if err != nil {
+		t.Fail()
+		return
 	}
 
 	sp.SetReadTimeout(time.Millisecond * 10)
@@ -27,98 +48,220 @@ func TestAllFolderSequentialPlayback(t *testing.T) {
 
 	time.Sleep(time.Millisecond * 500)
 
-	for {
-	INIT:
-		println("SD Playback source")
-		player.SelectPlaybackSource(PlaybackSourceSD)
+	player.SelectPlaybackSource(PlaybackSourceSD)
 
-		println("EQ set")
-		player.SetEQ(EqRock)
-
-		println("Stop repeat playback")
-		player.StopRepeatPlayback()
-
-		time.Sleep(time.Millisecond * 500)
-		player.Discard()
-
-		tracks, ok := player.GetSDTrackCount()
-		if ok {
-			println(fmt.Sprintf("Total SD tracks: %d", tracks))
-		} else {
-			println("GetSDTrackCount() failed")
-			time.Sleep(time.Second)
-			goto INIT
-		}
-
-		player.SetVolume(0)
-		player.StopDAC()
-
-		time.Sleep(time.Millisecond * 500)
-
-		println("Building folder playlist...")
-		folders, totalTracks := player.BuildFolderPlaylist()
-		println(fmt.Sprintf("Numerical folders: %02d containing %02d tracks", len(folders), totalTracks))
-
-		player.StartDAC()
-		player.SetAmplificationGain(true, 2)
-		player.SetVolume(1)
-
-		progress := 0
-		statusErrorCount := 0
-		for folder, folderTracks := range folders {
-			trackRuntime := time.Duration(time.Second * 0)
-			currentTrack := 0
-			for {
-				currentTrack++
-				if currentTrack > int(folderTracks) {
-					break
-				}
-				progress++
-				player.PlayFolderTrack(folder, uint8(currentTrack))
-				for {
-					cmd, param, ok := player.QueryStatus()
-					if ok {
-						switch cmd {
-						case ErrorCondition:
-							if param == ErrorTrackOutOfScope || param == ErrorTrackNotFound {
-								println(fmt.Sprintf("Track not found (folder: %02d, track: %02d)", folder, currentTrack))
-								goto NEXT
-							}
-						case MediaOut:
-							println("Media removed. Re-initializing...")
-							goto INIT
-
-						case SdTrackFinished:
-							if trackRuntime > minTrackPlaybackTime {
-								println(fmt.Sprintf("SD card track #%04d finished playing", param))
-								trackRuntime = time.Duration(time.Second * 0)
-								goto NEXT
-							}
-
-						case GetStatus:
-							if (param & 0x00FF) == TrackPlaying {
-								if trackRuntime == 0 {
-									println(fmt.Sprintf("Playing SD folder %02d, track: %0d/%0d", folder, progress, totalTracks))
-								}
-								trackRuntime = trackRuntime + trackPlaytimeIncrement
-							}
-						}
-					} else {
-						statusErrorCount++
-						println(fmt.Sprintf("QueryStatus() error count: %02d", statusErrorCount))
-					}
-					time.Sleep(trackPlaytimeIncrement)
-				}
-			NEXT:
-				time.Sleep(time.Millisecond * 0)
-			}
-		}
-		break
+	tracks, ok := player.GetSDTrackCount()
+	if !ok || tracks == 0 {
+		t.Fail()
 	}
 
-	println("Closing MP3 module")
+	player.Sleep()
+}
 
-	player.SetVolume(0)
+func TestFolderEnumeration(t *testing.T) {
+	sp, err := serial.Open(serialPortPath, &serial.Mode{BaudRate: 9600, DataBits: 8, Parity: serial.NoParity, StopBits: serial.OneStopBit})
+	if err != nil {
+		t.Fail()
+		return
+	}
+
+	sp.SetReadTimeout(time.Millisecond * 10)
+	defer sp.Close()
+
+	player := New(sp, DebugQuiet)
+	player.SetMaxTestTrackRuntime(time.Second * 20)
+
+	time.Sleep(time.Millisecond * 500)
+
+	player.SelectPlaybackSource(PlaybackSourceSD)
+
+	folders, totalTracks := player.BuildFolderPlaylist()
+
+	if len(folders) == 0 || totalTracks == 0 {
+		t.Fail()
+	}
+
+	player.Sleep()
+}
+
+func TestPlayNextTrack(t *testing.T) {
+	sp, err := serial.Open(serialPortPath, &serial.Mode{BaudRate: 9600, DataBits: 8, Parity: serial.NoParity, StopBits: serial.OneStopBit})
+	if err != nil {
+		t.Fail()
+		return
+	}
+
+	sp.SetReadTimeout(time.Millisecond * 10)
+	defer sp.Close()
+
+	player := New(sp, DebugLevel1)
+	player.SetMaxTestTrackRuntime(time.Second * 20)
+
+	time.Sleep(time.Millisecond * 500)
+
+	player.SelectPlaybackSource(PlaybackSourceSD)
+	player.SetVolume(3)
+	player.SetEQ(EqBass)
+	player.StopRepeatPlayback()
+
+	player.StartDAC()
+	player.SetAmplificationGain(true, 2)
+
+	player.PlayNextTrack()
+
+	for {
+		status := player.CheckTrackStatus(time.Second, time.Second*3)
+		switch status {
+		case SdTrackFinished:
+			goto EXIT
+		case ErrorTrackNotFound:
+			panic("Track not found")
+		case MediaOut:
+			panic("Media out")
+		default:
+			time.Sleep(time.Millisecond * 100)
+		}
+	}
+
+EXIT:
+	player.Stop()
+	player.StopDAC()
+	player.Sleep()
+}
+
+func TestPlayFolderTrack(t *testing.T) {
+	sp, err := serial.Open(serialPortPath, &serial.Mode{BaudRate: 9600, DataBits: 8, Parity: serial.NoParity, StopBits: serial.OneStopBit})
+	if err != nil {
+		t.Fail()
+		return
+	}
+
+	sp.SetReadTimeout(time.Millisecond * 10)
+	defer sp.Close()
+
+	player := New(sp, DebugLevel1)
+	player.SetMaxTestTrackRuntime(time.Second * 20)
+
+	time.Sleep(time.Millisecond * 500)
+
+	player.SelectPlaybackSource(PlaybackSourceSD)
+	player.SetVolume(3)
+	player.SetEQ(EqBass)
+	player.StopRepeatPlayback()
+
+	player.StartDAC()
+	player.SetAmplificationGain(true, 2)
+
+	player.PlayFolderTrack(1, 1)
+
+	for {
+		status := player.CheckTrackStatus(time.Second, time.Second*3)
+		switch status {
+		case SdTrackFinished:
+			goto EXIT
+		case ErrorTrackNotFound:
+			panic("Track not found")
+		case MediaOut:
+			panic("Media out")
+		default:
+			time.Sleep(time.Millisecond * 100)
+		}
+	}
+
+EXIT:
+	player.Stop()
+	player.StopDAC()
+	player.Sleep()
+}
+
+func TestPlayAdvertFolderTrack(t *testing.T) {
+	sp, err := serial.Open(serialPortPath, &serial.Mode{BaudRate: 9600, DataBits: 8, Parity: serial.NoParity, StopBits: serial.OneStopBit})
+	if err != nil {
+		t.Fail()
+		return
+	}
+
+	sp.SetReadTimeout(time.Millisecond * 10)
+	defer sp.Close()
+
+	player := New(sp, DebugLevel1)
+	player.SetMaxTestTrackRuntime(time.Second * 20)
+
+	time.Sleep(time.Millisecond * 500)
+
+	player.SelectPlaybackSource(PlaybackSourceSD)
+	player.SetVolume(3)
+	player.SetEQ(EqBass)
+	player.StopRepeatPlayback()
+
+	player.StartDAC()
+	player.SetAmplificationGain(true, 2)
+
+	player.PlayMP3FolderTrack(1)
+	time.Sleep(time.Second * 3)
+	player.PlayAdvertFolder(1)
+
+	for {
+		status := player.CheckTrackStatus(time.Second, time.Second*3)
+		switch status {
+		case SdTrackFinished:
+			goto EXIT
+		case ErrorTrackNotFound:
+			panic("Track not found")
+		case MediaOut:
+			panic("Media out")
+		default:
+			time.Sleep(time.Millisecond * 100)
+		}
+	}
+
+EXIT:
+	player.StopAdvert()
+	player.Stop()
+	player.StopDAC()
+	player.Sleep()
+}
+
+func TestPlay3KFolderTrack(t *testing.T) {
+	sp, err := serial.Open(serialPortPath, &serial.Mode{BaudRate: 9600, DataBits: 8, Parity: serial.NoParity, StopBits: serial.OneStopBit})
+	if err != nil {
+		t.Fail()
+		return
+	}
+
+	sp.SetReadTimeout(time.Millisecond * 10)
+	defer sp.Close()
+
+	player := New(sp, DebugLevel1)
+	player.SetMaxTestTrackRuntime(time.Second * 20)
+
+	time.Sleep(time.Millisecond * 500)
+
+	player.SelectPlaybackSource(PlaybackSourceSD)
+	player.SetVolume(3)
+	player.SetEQ(EqBass)
+	player.StopRepeatPlayback()
+
+	player.StartDAC()
+	player.SetAmplificationGain(true, 2)
+
+	player.Play3KFolderTrack(10, 3000)
+
+	for {
+		status := player.CheckTrackStatus(time.Second, time.Second*3)
+		switch status {
+		case SdTrackFinished:
+			goto EXIT
+		case ErrorTrackNotFound:
+			panic("Track not found")
+		case MediaOut:
+			panic("Media out")
+		default:
+			time.Sleep(time.Millisecond * 100)
+		}
+	}
+
+EXIT:
 	player.Stop()
 	player.StopDAC()
 	player.Sleep()

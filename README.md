@@ -18,7 +18,7 @@
 
     5. Folder 'mp3': '0001.mp3','0002.mp3','0003.mp3','0004.mp3','0005.mp3','0006.mp3','0007.mp3','0008.mp3','0009.mp3','0010.mp3'
 
-    Note: the track numbering scheme **matters** and dictates which playback functions can to be used. Please read the chip's datasheet under /Docs for more information on file and folder naming conventions.
+    Note: the track numbering scheme **matters** and dictates which playback functions can be used. Please read the chip's datasheet under /Docs for more information on file and folder naming conventions.
 
 
 ## Hardware setup requirements:

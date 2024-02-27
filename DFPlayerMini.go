@@ -113,22 +113,8 @@ const (
 
 // SerialPort abstracts the actual interface to a generic serial port
 type SerialPort interface {
-	// Stores data received from the serial port into the provided byte array
-	// buffer. The function returns the number of bytes read.
-	//
-	// The Read function blocks until (at least) one byte is received from
-	// the serial port or an error occurs.
 	Read(p []byte) (n int, err error)
-
-	// Send the content of the data byte array to the serial port.
-	// Returns the number of bytes written.
 	Write(p []byte) (n int, err error)
-
-	// SetReadTimeout sets the timeout for the Read operation or use serial.NoTimeout to disable read timeout.
-	SetReadTimeout(t time.Duration) error
-
-	// Close the serial port
-	Close() error
 }
 
 // Wraps the DF Player Mini functions
